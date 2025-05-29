@@ -1,0 +1,90 @@
+# Ignore anything with "checkpoint"
+*checkpoint*
+
+# Ignore packaging metadata directories
+*.egg-info/
+
+# Ignore Python cache
+__pycache__/
+**/__pycache__/
+
+# Ignore Python bytecode
+*.pyc
+*.pyo
+
+# Ignore variables file
+variables.py
+
+# Ignore HDF5-based files
+*.h5ad
+*.h5Seurat
+*.h5
+
+# Ignore R data files
+*.rds
+
+# Ignore Matrix Market files and compressed versions
+*.mtx
+*.mtx.gz
+*.mtx.zip
+
+# Ignore model files
+*.pt
+*.sav
+*.pkl
+
+# Ignore tar.gz archives
+*.tar.gz
+
+# Ignore virtual environments
+venv/
+.venv/
+
+# Ignore skipped files list
+skipped_files_abs_paths.txt
+
+# General temporary or binary files
+*.tmp
+*.bak
+
+# Ignore specific bioinformatics and analysis files
+*_cmdline
+*_invocation
+*possorted_genome_bam.bam.bai
+*.bam
+*.bai
+*.fasta
+*.fasta.fai
+*.fai
+*.fastq
+
+# Ignore CSV outputs from clustering or component analysis ONLY inside folders ending with graphclust or clusters
+**/*graphclust/clusters.csv
+**/*clusters/clusters.csv
+**/*graphclust/differential_expression.csv
+**/*clusters/differential_expression.csv
+
+# Ignore zipped files
+*.zip
+
+# Ignore 10x Genomics and sequencing output formats
+*.cloupe
+*.vloupe
+*contig_info.pb
+*vdj_reference/
+
+# Ignore all files inside directories whose last part ends with GRCh38-2020-A or GRCh38-7_0_0
+**/*GRCh38-2020-A/** 
+**/*GRCh38-7_0_0/**
+
+# Ignore any files inside filtered_feature_bc_matrix or raw_feature_bc_matrix directories
+**/filtered_feature_bc_matrix/**
+**/raw_feature_bc_matrix/**
+
+# Ignore specific tab-separated and compressed gene annotation files (compressed and uncompressed)
+barcodes.tsv
+barcodes.tsv.gz
+features.tsv
+features.tsv.gz
+genes.tsv
+genes.tsv.gz
