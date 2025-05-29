@@ -11,11 +11,11 @@
 ./Topics/Single_cell_sequencing/Python/.ipynb_checkpoints/Common_package_imports_python-checkpoint.ipynb | ignored | 72 bytes
 ./Topics/Single_cell_sequencing/R/.ipynb_checkpoints/Save_data_10x_format_R-checkpoint.ipynb | ignored | 72 bytes
 ./Topics/Visualisation/.ipynb_checkpoints/Seaborn_and_matplotlib-checkpoint.ipynb | ignored | 72 bytes
-./Topics/IPython/.ipynb_checkpoints/Store_magic_retrieval-checkpoint.ipynb | ignored | 72 bytes
+./Topics/IPython/.ipynb_checkpoints/Store_magic_retrieval-checkpoint.ipynb | ignored | 2497 bytes
 ./Topics/IPython/.ipynb_checkpoints/Save_jupter_notebook_output_to_variable-checkpoint.ipynb | ignored | 72 bytes
 ./Topics/IPython/.ipynb_checkpoints/Save_jupyternotebook_outputs_to_HTML-checkpoint.ipynb | ignored | 72 bytes
-./Topics/IPython/.ipynb_checkpoints/Magic_commands-checkpoint.ipynb | ignored | 5562 bytes
-./skipped_files_abs_paths.txt | ignored | 430 bytes
+./Topics/IPython/.ipynb_checkpoints/Magic_commands-checkpoint.ipynb | ignored | 16889 bytes
+./skipped_files_abs_paths.txt | ignored | 3582 bytes
 ./Languages/Python/.ipynb_checkpoints/Python_in_built_libraries-checkpoint.ipynb | ignored | 72 bytes
 ./Languages/Python/.ipynb_checkpoints/Python_basics-checkpoint.ipynb | ignored | 72 bytes
 ./Languages/Python/.ipynb_checkpoints/Multiprocessing_multithreading-checkpoint.ipynb | ignored | 72 bytes
