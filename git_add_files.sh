@@ -81,3 +81,9 @@ while IFS='|' read -r filepath _; do
 done < skipped_files.txt
 
 echo "Absolute paths of skipped files saved in skipped_files_abs_paths.txt"
+
+# add all deleted files ready for commit
+git add -u :/
+echo "Added all potentially deleted files ready for commit"
+
+echo "Commit ready"
