@@ -32,10 +32,11 @@
 ./Topics/IPython/save_to_html_for_code_block_as_report/.ipynb_checkpoints/report_2-checkpoint.html | ignored | 186055 bytes
 ./Topics/IPython/save_to_html_for_code_block_as_report/__pycache__/capture_report.cpython-39.pyc | ignored | 8629 bytes
 ./Topics/IPython/capture_utils/.ipynb_checkpoints/Test_HTML_codeblock_capture-checkpoint.ipynb | ignored | 44131 bytes
-./skipped_files_abs_paths.txt | ignored | 5271 bytes
+./skipped_files_abs_paths.txt | ignored | 6074 bytes
 ./Languages/Python/.ipynb_checkpoints/Python_in_built_libraries-checkpoint.ipynb | ignored | 72 bytes
 ./Languages/Python/.ipynb_checkpoints/Python_basics-checkpoint.ipynb | ignored | 72 bytes
 ./Languages/Python/.ipynb_checkpoints/Multiprocessing_multithreading-checkpoint.ipynb | ignored | 72 bytes
+./Languages/SQL/.ipynb_checkpoints/MySQL-checkpoint.ipynb | ignored | 19445 bytes
 ./Remote_development/.ipynb_checkpoints/Access_notebook_through_vscode-checkpoint.ipynb | ignored | 907 bytes
 ./Terminal/.ipynb_checkpoints/Github_snippets-checkpoint.ipynb | ignored | 26803 bytes
 ./Terminal/.ipynb_checkpoints/Cellxgene_snippets-checkpoint.ipynb | ignored | 9081 bytes
