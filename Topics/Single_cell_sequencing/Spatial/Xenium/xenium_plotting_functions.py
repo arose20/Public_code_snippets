@@ -2,10 +2,13 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import anndata as ad
+
 import scipy.sparse as sp
 from scipy.stats import gaussian_kde
 from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter1d
 from sklearn.neighbors import KDTree
+from shapely.geometry import Polygon, MultiPoint
 
 
 import seaborn as sns
@@ -14,8 +17,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.lines import Line2D
 from matplotlib.colors import ListedColormap, BoundaryNorm
-
 from skimage.color import lab2rgb
+
 
 from typing import Optional, Tuple, List, Dict, Union
 
@@ -712,3 +715,77 @@ def add_multiradius_celltype_density(
 
             if normalize_global:
                 adata.obs[f"{col}_norm"] = density / global_density[ct]
+
+                
+                
+                
+def complete_roi_shapes_in_place(
+    adata_subset,
+    rois_to_update,
+    use_convex_hull=False,
+    smooth=False,
+    sigma=2.0
+):
+    """
+    Completes ROI shapes in-place in adata_subset.uns["ROI_info"].
+    Direct polygons can optionally be smoothed AFTER being fully enclosed.
+
+    Parameters
+    ----------
+    adata_subset : AnnData
+    rois_to_update : str or list of str
+        Single ROI or list of ROI names.
+    use_convex_hull : bool
+        If True, constructs convex hull from points.
+    smooth : bool
+        If True and use_convex_hull=False, smooths the polygon after fully enclosing.
+    sigma : float
+        Standard deviation for Gaussian smoothing.
+    """
+    if isinstance(rois_to_update, str):
+        rois_to_update = [rois_to_update]
+
+    for roi_name in rois_to_update:
+        all_coords = []
+
+        # Gather all coordinates
+        for roi_key in adata_subset.uns["ROI_names"][roi_name]:
+            roi_entry = adata_subset.uns["ROI_info"][roi_key]["rois"]
+            for shape in roi_entry["shapes"]:
+                coords = np.array(shape["coords"], dtype=float)
+                all_coords.append(coords)
+
+        all_coords = np.vstack(all_coords)
+
+        # 1️⃣ Build polygon
+        if use_convex_hull:
+            polygon = MultiPoint(all_coords).convex_hull
+            new_coords = np.array(polygon.exterior.coords)
+        else:
+            # Direct polygon
+            polygon = Polygon(all_coords)
+            new_coords = np.array(polygon.exterior.coords)
+
+            # Ensure the loop is fully closed
+            if not np.allclose(new_coords[0], new_coords[-1]):
+                new_coords = np.vstack([new_coords, new_coords[0]])
+
+            # 2️⃣ Smooth **after full loop**
+            if smooth:
+                # Only smooth the internal points, exclude the duplicate last point
+                x, y = new_coords[:-1, 0], new_coords[:-1, 1]
+                x_smooth = gaussian_filter1d(x, sigma=sigma)
+                y_smooth = gaussian_filter1d(y, sigma=sigma)
+                # Re-attach the first point at the end to keep loop closed
+                new_coords = np.column_stack([x_smooth, y_smooth])
+                new_coords = np.vstack([new_coords, new_coords[0]])
+                polygon = Polygon(new_coords)
+
+        # 3️⃣ Update in-place
+        for roi_key in adata_subset.uns["ROI_names"][roi_name]:
+            roi_entry = adata_subset.uns["ROI_info"][roi_key]["rois"]
+            for shape in roi_entry["shapes"]:
+                shape["coords"] = new_coords.copy()
+            roi_entry["polygon"] = polygon
+
+        print(f"Completed connecting ROI '{roi_name}' in place. Convex hull: {use_convex_hull}, smooth: {smooth}, points: {len(new_coords)}")
