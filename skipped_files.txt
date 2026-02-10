@@ -40,6 +40,7 @@
 ./Remote_development/.ipynb_checkpoints/Access_notebook_through_vscode-checkpoint.ipynb | ignored | 907 bytes
 ./Terminal/.ipynb_checkpoints/Github_snippets-checkpoint.ipynb | ignored | 26803 bytes
 ./Terminal/.ipynb_checkpoints/Cellxgene_snippets-checkpoint.ipynb | ignored | 9081 bytes
+./Terminal/.ipynb_checkpoints/File_compression-checkpoint.ipynb | ignored | 72 bytes
 ./Terminal/.ipynb_checkpoints/File_transfering-checkpoint.ipynb | ignored | 53769 bytes
 ./Terminal/.ipynb_checkpoints/Anaconda_snippets-checkpoint.ipynb | ignored | 10421 bytes
 ./Packages/Python/.ipynb_checkpoints/Scanpy-checkpoint.ipynb | ignored | 14507 bytes
