@@ -8,8 +8,9 @@ from scipy.stats import gaussian_kde
 from scipy.ndimage import gaussian_filter
 from scipy.ndimage import gaussian_filter1d
 from sklearn.neighbors import KDTree
-from shapely.geometry import Polygon, MultiPoint
 
+from shapely.geometry import Polygon, MultiPoint, Point
+from shapely.vectorized import contains
 
 import seaborn as sns
 import matplotlib as mpl
@@ -21,7 +22,6 @@ from skimage.color import lab2rgb
 
 
 from typing import Optional, Tuple, List, Dict, Union
-
 
 def kde_category_spatial(
     adata: ad.AnnData,
@@ -717,30 +717,18 @@ def add_multiradius_celltype_density(
                 adata.obs[f"{col}_norm"] = density / global_density[ct]
 
                 
-                
-                
+            
+
 def complete_roi_shapes_in_place(
-    adata_subset,
+    adata,
     rois_to_update,
     use_convex_hull=False,
     smooth=False,
     sigma=2.0
 ):
     """
-    Completes ROI shapes in-place in adata_subset.uns["ROI_info"].
-    Direct polygons can optionally be smoothed AFTER being fully enclosed.
-
-    Parameters
-    ----------
-    adata_subset : AnnData
-    rois_to_update : str or list of str
-        Single ROI or list of ROI names.
-    use_convex_hull : bool
-        If True, constructs convex hull from points.
-    smooth : bool
-        If True and use_convex_hull=False, smooths the polygon after fully enclosing.
-    sigma : float
-        Standard deviation for Gaussian smoothing.
+    Completes ROI shapes in-place in adata.uns["ROI_info"].
+    Coordinates remain in **image pixel space** for proper alignment with images.
     """
     if isinstance(rois_to_update, str):
         rois_to_update = [rois_to_update]
@@ -749,43 +737,987 @@ def complete_roi_shapes_in_place(
         all_coords = []
 
         # Gather all coordinates
-        for roi_key in adata_subset.uns["ROI_names"][roi_name]:
-            roi_entry = adata_subset.uns["ROI_info"][roi_key]["rois"]
+        for roi_key in adata.uns["ROI_names"][roi_name]:
+            roi_entry = adata.uns["ROI_info"][roi_key]["rois"]
             for shape in roi_entry["shapes"]:
                 coords = np.array(shape["coords"], dtype=float)
                 all_coords.append(coords)
 
         all_coords = np.vstack(all_coords)
 
-        # 1️⃣ Build polygon
+        # Build polygon
         if use_convex_hull:
             polygon = MultiPoint(all_coords).convex_hull
             new_coords = np.array(polygon.exterior.coords)
         else:
-            # Direct polygon
             polygon = Polygon(all_coords)
             new_coords = np.array(polygon.exterior.coords)
-
-            # Ensure the loop is fully closed
             if not np.allclose(new_coords[0], new_coords[-1]):
                 new_coords = np.vstack([new_coords, new_coords[0]])
 
-            # 2️⃣ Smooth **after full loop**
             if smooth:
-                # Only smooth the internal points, exclude the duplicate last point
                 x, y = new_coords[:-1, 0], new_coords[:-1, 1]
                 x_smooth = gaussian_filter1d(x, sigma=sigma)
                 y_smooth = gaussian_filter1d(y, sigma=sigma)
-                # Re-attach the first point at the end to keep loop closed
                 new_coords = np.column_stack([x_smooth, y_smooth])
                 new_coords = np.vstack([new_coords, new_coords[0]])
                 polygon = Polygon(new_coords)
 
-        # 3️⃣ Update in-place
-        for roi_key in adata_subset.uns["ROI_names"][roi_name]:
-            roi_entry = adata_subset.uns["ROI_info"][roi_key]["rois"]
+        # Update in-place
+        for roi_key in adata.uns["ROI_names"][roi_name]:
+            roi_entry = adata.uns["ROI_info"][roi_key]["rois"]
             for shape in roi_entry["shapes"]:
                 shape["coords"] = new_coords.copy()
-            roi_entry["polygon"] = polygon
 
-        print(f"Completed connecting ROI '{roi_name}' in place. Convex hull: {use_convex_hull}, smooth: {smooth}, points: {len(new_coords)}")
+        print(f"Completed ROI '{roi_name}' in place. Convex hull: {use_convex_hull}, smooth: {smooth}, points: {len(new_coords)}")
+
+
+def create_vessel_mask(
+    adata,
+    library_id: str,
+    name: str,
+    ROIs: list,
+    force_recalculate: bool = False,
+):
+    """
+    Create vessel mask using **pixel coordinates** aligned with the image.
+    Converts cell micron coordinates to pixel space to match ROIs.
+    """
+    uns_key = f"{name}_vessel_mask_information"
+    expected_keys = {"barcodes", "coords_filtered", "roi_polygons"}
+
+    if uns_key in adata.uns and expected_keys.issubset(adata.uns[uns_key].keys()):
+        if not force_recalculate:
+            print(f"Vessel mask '{uns_key}' exists. Skipping.")
+            return
+        else:
+            print(f"Overwriting vessel mask '{uns_key}' due to force_recalculate=True.")
+
+    # Convert cell coordinates from microns to pixels
+    microns_per_pixel = adata.uns["spatial"][library_id]["scalefactors"]["pixel_size"]
+    coords_micron = adata.obsm["spatial"]
+    coords_px = coords_micron / microns_per_pixel
+    cell_points = [Point(c) for c in coords_px]
+    cell_barcodes = adata.obs_names.to_numpy()
+
+    # Build ROI polygons in pixel space
+    roi_polygons = {}
+    for roi_name in ROIs:
+        roi_coords_all = []
+        for roi_key in adata.uns['ROI_names'][roi_name]:
+            roi_info = adata.uns['ROI_info'][roi_key]['rois']
+            for shape in roi_info['shapes']:
+                roi_coords_all.append(np.array(shape['coords'], dtype=float))
+        roi_coords_all = np.vstack(roi_coords_all)
+        roi_polygons[roi_name] = Polygon(roi_coords_all)
+
+    # Filter cells inside perivascular ROI
+    perivascular_poly = roi_polygons[ROIs[-1]]
+    inside_mask = np.array([perivascular_poly.contains(p) for p in cell_points])
+    barcodes_filtered = cell_barcodes[inside_mask]
+    coords_filtered = coords_px[inside_mask]
+
+    adata.uns[uns_key] = {
+        "barcodes": barcodes_filtered,
+        "coords_filtered": coords_filtered,
+        "roi_polygons": roi_polygons,
+    }
+
+    print(f"Vessel mask '{uns_key}' computed. {inside_mask.sum()} cells inside {ROIs[-1]}.")
+
+
+def compute_distance_vessel_mask(
+    adata,
+    vessel_mask: str,
+):
+    """
+    Compute distances in pixel coordinates aligned with image and ROIs.
+    Normalized distances 0–1 match plotting behavior.
+    """
+    uns_key = f"{vessel_mask}_vessel_mask_information"
+    if uns_key not in adata.uns:
+        raise ValueError(f"Vessel mask '{uns_key}' not found.")
+
+    coords_filtered = adata.uns[uns_key]['coords_filtered']
+    roi_polygons = adata.uns[uns_key]['roi_polygons']
+    roi_order = list(roi_polygons.keys())
+
+    lumen_poly = roi_polygons[roi_order[0]]
+    perivascular_poly = roi_polygons[roi_order[-1]]
+
+    points = [Point(c) for c in coords_filtered]
+    d_lumen_px = np.array([p.distance(lumen_poly.exterior) for p in points])
+    d_outer_px = np.array([p.distance(perivascular_poly.exterior) for p in points])
+
+    # Normalized distance
+    d_norm = d_lumen_px / (d_lumen_px + d_outer_px)
+
+    adata.uns[uns_key]['d_lumen_px'] = d_lumen_px
+    adata.uns[uns_key]['d_outer_px'] = d_outer_px
+    adata.uns[uns_key]['d_norm'] = d_norm
+
+    print(f"Distance computation for '{vessel_mask}' complete.")
+    print(f"Absolute distance to lumen: {d_lumen_px.min():.1f}–{d_lumen_px.max():.1f} px")
+    print(f"Normalized distance range: {d_norm.min():.3f}–{d_norm.max():.3f}")
+
+        
+
+def plot_gene_across_vessel_mask(
+    adata,
+    vessel_mask,
+    genes,
+    celltypes=None,              # list of celltypes to subset; None = all
+    category="cell_type",        # column in adata.obs
+    distance_type="normalized",  # "normalized" or "absolute"
+    n_bins=20,
+    ci=False,                    # plot bootstrap confidence interval
+    n_boot=500,                  # number of bootstrap iterations
+    save=False,
+):
+    """
+    Plot gene expression vs distance across a vessel mask.
+
+    Parameters
+    ----------
+    adata : AnnData
+    vessel_mask : str
+        Name used in adata.uns (expects {vessel_mask}_vessel_mask_information).
+    genes : list
+        Genes to plot.
+    celltypes : list or None
+        If provided, subset to these cell types.
+    category : str
+        Column in adata.obs containing cell type labels.
+    distance_type : str
+        "normalized" or "absolute"
+    n_bins : int
+        Number of bins along distance
+    ci : bool
+        If True, compute and plot bootstrap confidence intervals (95% CI)
+    n_boot : int
+        Number of bootstrap iterations
+    save : bool
+    """
+
+    uns_key = f"{vessel_mask}_vessel_mask_information"
+    if uns_key not in adata.uns:
+        raise ValueError(f"{uns_key} not found in adata.uns")
+
+    data = adata.uns[uns_key]
+    barcodes = np.array(data["barcodes"])
+    d_norm_all = np.array(data["d_norm"])
+    d_lumen_all = np.array(data["d_lumen_px"])  # convert externally if needed
+
+    # 1️⃣ Subset adata to vessel cells
+    adata_vessel = adata[barcodes].copy()
+    if not np.array_equal(adata_vessel.obs_names.to_numpy(), barcodes):
+        raise ValueError("Barcode order mismatch between adata and vessel mask.")
+
+    # 2️⃣ Extract cell type labels
+    if category not in adata_vessel.obs:
+        raise ValueError(f"{category} not found in adata.obs")
+    cell_type_labels = adata_vessel.obs[category].to_numpy()
+
+    # 3️⃣ Optional subsetting
+    mask = np.ones(adata_vessel.n_obs, dtype=bool)
+    if celltypes is not None:
+        if isinstance(celltypes, str):
+            celltypes = [celltypes]
+        mask = np.isin(cell_type_labels, celltypes)
+
+    d_norm = d_norm_all[mask]
+    d_lumen = d_lumen_all[mask]
+    cell_type_labels = cell_type_labels[mask]
+    adata_vessel = adata_vessel[mask]
+
+    # 4️⃣ Extract expression
+    expr_dict = {}
+    for g in genes:
+        if g not in adata_vessel.var_names:
+            raise ValueError(f"{g} not found in adata.var_names")
+        expr = adata_vessel[:, g].X
+        if hasattr(expr, "toarray"):
+            expr = expr.toarray().ravel()
+        else:
+            expr = np.asarray(expr).ravel()
+        expr_dict[g] = expr
+
+    # 5️⃣ Build dataframe
+    df = pd.DataFrame({
+        "d_norm": d_norm,
+        "d_lumen": d_lumen,
+        category: cell_type_labels
+    })
+    for g in genes:
+        df[g] = expr_dict[g]
+
+    print(f"Dataframe constructed with {len(df)} cells.")
+
+    # 6️⃣ Choose distance type
+    if distance_type.lower() == "normalized":
+        bins = np.linspace(0, 1, n_bins + 1)
+        df["bin"] = pd.cut(df["d_norm"], bins=bins, labels=False)
+        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+        xlabel = "Normalized distance (lumen → perivascular edge)"
+        xlim = (0, 1)
+    elif distance_type.lower() in ["absolute", "px"]:
+        max_val = np.percentile(d_lumen, 95)
+        bins = np.linspace(0, max_val, n_bins + 1)
+        df["bin"] = pd.cut(df["d_lumen"], bins=bins, labels=False)
+        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+        xlabel = "Distance from lumen (px)"
+        xlim = (0, max_val)
+    else:
+        raise ValueError("distance_type must be 'normalized' or 'absolute'")
+
+    # 7️⃣ Plot
+    plt.figure(figsize=(7, 5))
+
+    for g in genes:
+        mean_expr = df.groupby("bin")[g].mean()
+        plt.plot(bin_centers, mean_expr, marker="o", label=g)
+
+        if ci:
+            # Bootstrap CI
+            curves = []
+            for _ in range(n_boot):
+                sample = df.sample(frac=1, replace=True)
+                means = sample.groupby("bin")[g].mean().reindex(range(n_bins))
+                curves.append(means.values)
+            curves = np.vstack(curves)
+            lo = np.nanpercentile(curves, 2.5, axis=0)
+            hi = np.nanpercentile(curves, 97.5, axis=0)
+            plt.fill_between(bin_centers, lo, hi, alpha=0.25)
+
+    plt.xlabel(xlabel)
+    plt.ylabel("Mean expression per cell")
+    if celltypes:
+        plt.title(f"{vessel_mask}: Gene expression vs {distance_type} distance for selected celltypes")
+    else:
+        plt.title(f"{vessel_mask}: Gene expression vs {distance_type} distance")
+
+    plt.legend()
+    plt.grid(True)
+    plt.xlim(xlim)
+
+    if save:
+        plt.savefig(f"{vessel_mask}_gene_expression_{distance_type}.pdf", dpi=300)
+
+    plt.show()
+    plt.close()
+
+    
+
+
+def plot_celltype_composition_across_vessel(
+    adata,
+    vessel_mask,
+    celltypes_of_interest=None,
+    category="cell_type",
+    distance_type="normalized",
+    n_bins=20,
+    sigma=1,
+    colors=None,
+    save=False,
+):
+    """
+    Plot cell-type composition vs distance across vessel.
+
+    distance_type:
+        "normalized" → uses d_norm (0–1)
+        "absolute"   → uses d_lumen_px
+    """
+
+    uns_key = f"{vessel_mask}_vessel_mask_information"
+    if uns_key not in adata.uns:
+        raise ValueError(f"{uns_key} not found in adata.uns")
+
+    data = adata.uns[uns_key]
+    barcodes = np.array(data["barcodes"])
+    d_norm_all = np.array(data["d_norm"])
+    d_lumen_all = np.array(data["d_lumen_px"])
+
+    # Subset to vessel cells
+    adata_vessel = adata[barcodes].copy()
+
+    if category not in adata_vessel.obs:
+        raise ValueError(f"{category} not found in adata.obs")
+
+    cell_labels_all = adata_vessel.obs[category].to_numpy()
+
+    # -------------------------------------------------
+    # Determine celltypes
+    # -------------------------------------------------
+    using_all = celltypes_of_interest is None
+
+    if using_all:
+        celltypes = np.unique(cell_labels_all)
+        mask = np.ones(len(cell_labels_all), dtype=bool)
+        print("Using ALL celltypes present in vessel mask.")
+    else:
+        if isinstance(celltypes_of_interest, str):
+            celltypes_of_interest = [celltypes_of_interest]
+
+        mask = np.isin(cell_labels_all, celltypes_of_interest)
+        celltypes = np.array(celltypes_of_interest)
+
+        print(f"Using {mask.sum()} cells across selected celltypes.")
+
+    # Apply mask
+    cell_labels = cell_labels_all[mask]
+    d_norm = d_norm_all[mask]
+    d_lumen = d_lumen_all[mask]
+
+    if len(cell_labels) == 0:
+        raise ValueError("No cells found after subsetting.")
+
+    # -------------------------------------------------
+    # Choose distance type
+    # -------------------------------------------------
+    if distance_type.lower() == "normalized":
+        values = d_norm
+        bins = np.linspace(0, 1, n_bins + 1)
+        xlabel = "Normalized distance (0–1)"
+        xlim = (0, 1)
+
+    elif distance_type.lower() in ["absolute", "px"]:
+        if len(d_lumen) == 0:
+            raise ValueError("No distance values available.")
+        max_val = np.percentile(d_lumen, 95)
+        values = d_lumen
+        bins = np.linspace(0, max_val, n_bins + 1)
+        xlabel = "Distance from lumen (px)"
+        xlim = (0, max_val)
+
+    else:
+        raise ValueError("distance_type must be 'normalized' or 'absolute'")
+
+    bin_centers = 0.5 * (bins[:-1] + bins[1:])
+
+    # -------------------------------------------------
+    # Histogram
+    # -------------------------------------------------
+    hist = []
+
+    for ct in celltypes:
+        ct_mask = cell_labels == ct
+        counts, _ = np.histogram(values[ct_mask], bins=bins)
+        hist.append(counts)
+
+    hist = np.array(hist).T  # shape: bins × celltypes
+
+    # Convert to percentages per bin
+    hist_sum = hist.sum(axis=1, keepdims=True)
+    hist_pct = np.divide(
+        hist,
+        hist_sum,
+        out=np.zeros_like(hist, dtype=float),
+        where=hist_sum != 0
+    ) * 100
+
+    # -------------------------------------------------
+    # Plot
+    # -------------------------------------------------
+    print(f"Plotting CELL-TYPE COMPOSITION vs {distance_type} distance...")
+
+    plt.figure(figsize=(8, 5))
+
+    for i, ct in enumerate(celltypes):
+        color = None if colors is None else colors.get(ct, None)
+
+        plt.plot(
+            bin_centers,
+            gaussian_filter1d(hist_pct[:, i], sigma=sigma),
+            linewidth=2,
+            color=color,
+            label=ct
+        )
+
+    plt.xlabel(xlabel)
+    plt.ylabel("Cell-type percentage (%)")
+
+    if using_all:
+        plt.title(f"Cell-type composition vs {distance_type} distance")
+    else:
+        plt.title(
+            f"Cell-type composition vs {distance_type} distance\n"
+            f"(selected celltypes)"
+        )
+
+    plt.xlim(xlim)
+    plt.grid(True)
+
+    plt.legend(
+        title=category,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        borderaxespad=0,
+        frameon=False
+    )
+
+    plt.tight_layout()
+
+    if save:
+        plt.savefig(
+            f"{vessel_mask}_celltype_composition_{distance_type}_distance.pdf",
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+    plt.show()
+    plt.close()
+
+
+
+def plot_area_normalized_abundance(
+    adata,
+    vessel_mask,
+    celltypes_of_interest=None,
+    category="cell_type",
+    n_bins=20,
+    sigma=1,
+    n_mc=200_000,
+    colors=None,
+    save=False,
+):
+    """
+    Plot area-normalized cell abundance vs normalized distance.
+
+    - First polygon = lumen
+    - Last polygon = perivascular boundary
+    - Monte Carlo sampling vectorized for speed
+    """
+
+    uns_key = f"{vessel_mask}_vessel_mask_information"
+
+    if uns_key not in adata.uns:
+        raise ValueError(f"{uns_key} not found in adata.uns")
+
+    data = adata.uns[uns_key]
+
+    # -----------------------------------------
+    # Geometry
+    # -----------------------------------------
+    roi_polygons = list(data["roi_polygons"].values())
+
+    if len(roi_polygons) < 2:
+        raise ValueError("roi_polygons must contain at least two polygons")
+
+    lumen_poly = roi_polygons[0]
+    outer_poly = roi_polygons[-1]
+    perivascular_poly = outer_poly
+    lumen_boundary = lumen_poly.boundary
+    outer_boundary = outer_poly.boundary
+
+    # -----------------------------------------
+    # Cells
+    # -----------------------------------------
+    barcodes = np.array(data["barcodes"])
+    d_norm_all = np.array(data["d_norm"])
+    adata_vessel = adata[barcodes].copy()
+    cell_labels_all = adata_vessel.obs[category].to_numpy()
+
+    # Subset celltypes
+    using_all = celltypes_of_interest is None
+
+    if using_all:
+        celltypes = np.unique(cell_labels_all)
+        mask = np.ones(len(cell_labels_all), dtype=bool)
+        print("Using ALL celltypes present in vessel mask.")
+    else:
+        if isinstance(celltypes_of_interest, str):
+            celltypes_of_interest = [celltypes_of_interest]
+        mask = np.isin(cell_labels_all, celltypes_of_interest)
+        celltypes = np.array(celltypes_of_interest)
+        print(f"Using {mask.sum()} cells across selected celltypes.")
+
+    d_norm = d_norm_all[mask]
+    cell_labels = cell_labels_all[mask]
+
+    # -----------------------------------------
+    # Binning
+    # -----------------------------------------
+    bins_norm = np.linspace(0, 1, n_bins + 1)
+    bin_centers_norm = 0.5 * (bins_norm[:-1] + bins_norm[1:])
+
+    # -----------------------------------------
+    # Vectorized Monte Carlo area sampling
+    # -----------------------------------------
+    print("Performing vectorized Monte Carlo area correction...")
+
+    minx, miny, maxx, maxy = perivascular_poly.bounds
+
+    # Generate random points in bounding box
+    xs = np.random.uniform(minx, maxx, n_mc)
+    ys = np.random.uniform(miny, maxy, n_mc)
+
+    # Vectorized check which points are inside polygon
+    mask_inside = contains(perivascular_poly, xs, ys)
+
+    # Keep only points inside polygon
+    xs_in = xs[mask_inside]
+    ys_in = ys[mask_inside]
+
+    # Compute normalized distance for each point
+    # distance from lumen / (distance from lumen + distance to outer boundary)
+    mc_points = np.column_stack([xs_in, ys_in])
+    # distances from shapely
+    from shapely.geometry import Point as Point
+
+    # Vectorized distance computation using list comprehension
+    mc_d_norm = np.array([
+        lumen_boundary.distance(Point(x, y)) /
+        (lumen_boundary.distance(Point(x, y)) + Point(x, y).distance(outer_boundary))
+        for x, y in mc_points
+    ])
+
+    # Histogram & area fraction
+    area_counts, _ = np.histogram(mc_d_norm, bins=bins_norm)
+    area_fraction = area_counts / area_counts.sum()
+
+    print("Area correction complete.")
+    print("Plotting AREA-NORMALIZED cell density...")
+
+    # -----------------------------------------
+    # Plotting
+    # -----------------------------------------
+    plt.figure(figsize=(8, 5))
+
+    for ct in celltypes:
+        ct_mask = cell_labels == ct
+        obs_counts, _ = np.histogram(d_norm[ct_mask], bins=bins_norm)
+
+        # Area-normalized density
+        density = np.divide(
+            obs_counts,
+            area_fraction,
+            out=np.zeros_like(obs_counts, dtype=float),
+            where=area_fraction != 0
+        )
+
+        # Relative scaling for shape comparison
+        if np.nanmax(density) > 0:
+            density = density / np.nanmax(density)
+
+        color = None if colors is None else colors.get(ct, None)
+
+        plt.plot(
+            bin_centers_norm,
+            gaussian_filter1d(density, sigma=sigma),
+            linewidth=2,
+            color=color,
+            label=ct
+        )
+
+    plt.xlabel("Normalized distance (0–1)")
+    plt.ylabel("Relative cell density (area-corrected)")
+    plt.xlim(0, 1)
+    plt.grid(True)
+
+    plt.legend(
+        title=category,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        borderaxespad=0,
+        frameon=False
+    )
+
+    plt.tight_layout()
+
+    if save:
+        plt.savefig(
+            f"{vessel_mask}_cell_density_area_normalized.pdf",
+            dpi=300,
+            bbox_inches="tight"
+        )
+
+    plt.show()
+    plt.close()
+
+    
+
+
+def plot_celltype_comparison_area_corrected(
+    adata,
+    vessel_mask,
+    celltypes_of_interest=None,
+    category="cell_type",
+    n_bins=20,
+    sigma=1,
+    n_mc=200_000,
+    colors=None,
+    save=False,
+):
+    """
+    Compare radial distribution of celltypes across a vessel, area-corrected.
+
+    This accounts for increasing annular area at larger radii using Monte Carlo
+    sampling and shows **fraction of each celltype per bin** corrected by area.
+    """
+
+    uns_key = f"{vessel_mask}_vessel_mask_information"
+    if uns_key not in adata.uns:
+        raise ValueError(f"{uns_key} not found in adata.uns")
+
+    data = adata.uns[uns_key]
+
+    # ------------------------------
+    # Geometry: first = lumen, last = perivascular
+    # ------------------------------
+    roi_polygons = list(data["roi_polygons"].values())
+    if len(roi_polygons) < 2:
+        raise ValueError("roi_polygons must contain at least two polygons")
+
+    lumen_poly = roi_polygons[0]
+    outer_poly = roi_polygons[-1]
+    lumen_boundary = lumen_poly.boundary
+    outer_boundary = outer_poly.boundary
+    perivascular_poly = outer_poly
+
+    # ------------------------------
+    # Cells
+    # ------------------------------
+    barcodes = np.array(data["barcodes"])
+    d_norm_all = np.array(data["d_norm"])
+    adata_vessel = adata[barcodes].copy()
+    cell_labels_all = adata_vessel.obs[category].to_numpy()
+
+    # Subset celltypes
+    if celltypes_of_interest is None:
+        celltypes_of_interest = np.unique(cell_labels_all)
+    elif isinstance(celltypes_of_interest, str):
+        celltypes_of_interest = [celltypes_of_interest]
+
+    mask = np.isin(cell_labels_all, celltypes_of_interest)
+    d_norm = d_norm_all[mask]
+    cell_labels = cell_labels_all[mask]
+
+    print(f"Comparing {len(celltypes_of_interest)} celltypes across {mask.sum()} cells")
+
+    # ------------------------------
+    # Binning
+    # ------------------------------
+    bins_norm = np.linspace(0, 1, n_bins + 1)
+    bin_centers = 0.5 * (bins_norm[:-1] + bins_norm[1:])
+
+    # ------------------------------
+    # Monte Carlo area sampling (vectorized)
+    # ------------------------------
+    print("Performing Monte Carlo area correction...")
+
+    minx, miny, maxx, maxy = perivascular_poly.bounds
+
+    xs = np.random.uniform(minx, maxx, n_mc)
+    ys = np.random.uniform(miny, maxy, n_mc)
+    mask_inside = contains(perivascular_poly, xs, ys)
+    xs_in = xs[mask_inside]
+    ys_in = ys[mask_inside]
+    mc_points = np.column_stack([xs_in, ys_in])
+
+    # Compute normalized distance for MC points
+    mc_d_norm = np.array([
+        lumen_boundary.distance(Point(x, y)) /
+        (lumen_boundary.distance(Point(x, y)) + Point(x, y).distance(outer_boundary))
+        for x, y in mc_points
+    ])
+
+    area_counts, _ = np.histogram(mc_d_norm, bins=bins_norm)
+    area_fraction = area_counts / area_counts.sum()
+
+    # ------------------------------
+    # Histogram per celltype
+    # ------------------------------
+    hist = np.zeros((n_bins, len(celltypes_of_interest)))
+
+    for i, ct in enumerate(celltypes_of_interest):
+        ct_mask = cell_labels == ct
+        obs_counts, _ = np.histogram(d_norm[ct_mask], bins=bins_norm)
+
+        # Area-corrected counts
+        density = np.divide(
+            obs_counts,
+            area_fraction,
+            out=np.zeros_like(obs_counts, dtype=float),
+            where=area_fraction != 0
+        )
+
+        hist[:, i] = density
+
+    # ------------------------------
+    # Normalize per bin to get fractions
+    # ------------------------------
+    hist_sum = hist.sum(axis=1, keepdims=True)
+    fraction_per_bin = np.divide(hist, hist_sum, out=np.zeros_like(hist), where=hist_sum != 0)
+
+    # ------------------------------
+    # Smooth and plot
+    # ------------------------------
+    plt.figure(figsize=(8, 5))
+
+    for i, ct in enumerate(celltypes_of_interest):
+        y_smooth = gaussian_filter1d(fraction_per_bin[:, i], sigma=sigma)
+        color = None if colors is None else colors.get(ct, None)
+
+        plt.plot(
+            bin_centers,
+            y_smooth,
+            linewidth=2,
+            color=color,
+            label=ct
+        )
+
+    plt.xlabel("Normalized distance (0–1)")
+    plt.ylabel("Area-corrected fraction per bin")
+    plt.title("Area-corrected celltype comparison across vessel")
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    plt.grid(True)
+
+    plt.legend(
+        title=category,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        borderaxespad=0,
+        frameon=False
+    )
+
+    plt.tight_layout()
+
+    if save:
+        plt.savefig(f"{vessel_mask}_celltype_comparison_area_corrected.pdf", dpi=300, bbox_inches="tight")
+
+    plt.show()
+    plt.close()
+
+    
+
+def plot_gene_across_multiple_vessels(
+    adata,
+    vessel_masks,
+    genes,
+    celltypes=None,
+    category="cell_type",
+    n_bins=20,
+    ci=False,
+    save=False,
+):
+    """
+    Plot gene expression averaged across multiple vessel masks (normalized distance only).
+
+    Parameters
+    ----------
+    adata : AnnData
+    vessel_masks : list of str
+        Vessel mask names to average across
+    genes : list
+        Genes to plot
+    celltypes : list or None
+        Subset to these celltypes if provided
+    category : str
+        Column in adata.obs with cell type labels
+    n_bins : int
+        Number of distance bins (0-1 normalized)
+    ci : bool
+        Whether to show confidence intervals across vessels
+    save : bool
+    """
+
+    # Prepare bins
+    bins = np.linspace(0, 1, n_bins + 1)
+    bin_centers = 0.5 * (bins[:-1] + bins[1:])
+
+    # Store mean expressions per vessel
+    gene_means_per_vessel = {g: [] for g in genes}
+
+    for vessel_mask in vessel_masks:
+        uns_key = f"{vessel_mask}_vessel_mask_information"
+        if uns_key not in adata.uns:
+            raise ValueError(f"{uns_key} not found in adata.uns")
+        data = adata.uns[uns_key]
+
+        barcodes = np.array(data["barcodes"])
+        d_norm_all = np.array(data["d_norm"])
+
+        adata_vessel = adata[barcodes].copy()
+        cell_type_labels = adata_vessel.obs[category].to_numpy()
+
+        # Subset to celltypes if requested
+        mask = np.ones(len(barcodes), dtype=bool)
+        if celltypes is not None:
+            if isinstance(celltypes, str):
+                celltypes = [celltypes]
+            mask = np.isin(cell_type_labels, celltypes)
+
+        d_norm = d_norm_all[mask]
+        cell_labels = cell_type_labels[mask]
+        adata_vessel = adata_vessel[mask]
+
+        # Extract expression
+        expr_dict = {}
+        for g in genes:
+            expr = adata_vessel[:, g].X
+            if hasattr(expr, "toarray"):
+                expr = expr.toarray().ravel()
+            else:
+                expr = np.asarray(expr).ravel()
+            expr_dict[g] = expr
+
+        # Bin expression per vessel
+        df_vessel = pd.DataFrame({"d_norm": d_norm})
+        for g in genes:
+            df_vessel[g] = expr_dict[g]
+
+        for g in genes:
+            mean_expr = df_vessel.groupby(pd.cut(df_vessel["d_norm"], bins=bins, labels=False))[g].mean()
+            # Ensure all bins present
+            mean_expr = mean_expr.reindex(range(n_bins), fill_value=np.nan)
+            gene_means_per_vessel[g].append(mean_expr.values)
+
+    # -------------------------------------------------
+    # Average across vessels
+    # -------------------------------------------------
+    plt.figure(figsize=(8, 5))
+
+    for g in genes:
+        mat = np.vstack(gene_means_per_vessel[g])  # vessels x bins
+        mean_all = np.nanmean(mat, axis=0)
+        plt.plot(bin_centers, mean_all, marker="o", label=g)
+
+        if ci:
+            lo = np.nanpercentile(mat, 2.5, axis=0)
+            hi = np.nanpercentile(mat, 97.5, axis=0)
+            plt.fill_between(bin_centers, lo, hi, alpha=0.25)
+
+    plt.xlabel("Normalized distance (0 = lumen, 1 = perivascular edge)")
+    plt.ylabel("Mean expression per cell")
+    plt.title(f"Average gene expression across {len(vessel_masks)} vessels")
+    plt.grid(True)
+    plt.legend()
+    plt.xlim(0, 1)
+
+    if save:
+        plt.savefig("gene_expression_avg_multiple_vessels.pdf", dpi=300)
+
+    plt.show()
+    plt.close()
+
+    
+    
+
+
+def plot_gene_across_vessels_with_ci(
+    adata,
+    vessel_masks,
+    genes,
+    celltypes=None,              # list of celltypes to subset; None = all
+    category="cell_type",        # column in adata.obs
+    n_bins=20,
+    n_boot=500,                  # bootstrap iterations per vessel
+    save=False,
+):
+    """
+    Plot gene expression averaged across multiple vessels (normalized distance only),
+    with vessel-to-vessel variability and per-vessel bootstrap confidence intervals.
+
+    Parameters
+    ----------
+    adata : AnnData
+    vessel_masks : list of str
+        Vessel mask names to average across
+    genes : list
+        Genes to plot
+    celltypes : list or None
+        Subset to these celltypes if provided
+    category : str
+        Column in adata.obs with cell type labels
+    n_bins : int
+        Number of bins along normalized distance
+    n_boot : int
+        Number of bootstrap iterations per vessel
+    save : bool
+        Whether to save the figure
+    """
+
+    bins = np.linspace(0, 1, n_bins + 1)
+    bin_centers = 0.5 * (bins[:-1] + bins[1:])
+
+    # Store binned values per gene and per vessel
+    gene_binned_vessels = {g: [] for g in genes}
+
+    for vessel_mask in vessel_masks:
+        uns_key = f"{vessel_mask}_vessel_mask_information"
+        if uns_key not in adata.uns:
+            raise ValueError(f"{uns_key} not found in adata.uns")
+        data = adata.uns[uns_key]
+
+        barcodes = np.array(data["barcodes"])
+        d_norm_all = np.array(data["d_norm"])
+
+        adata_vessel = adata[barcodes].copy()
+        cell_type_labels = adata_vessel.obs[category].to_numpy()
+
+        # Optional subsetting
+        mask = np.ones(len(barcodes), dtype=bool)
+        if celltypes is not None:
+            if isinstance(celltypes, str):
+                celltypes = [celltypes]
+            mask = np.isin(cell_type_labels, celltypes)
+
+        d_norm = d_norm_all[mask]
+        adata_vessel = adata_vessel[mask]
+
+        # Extract expression per gene
+        expr_dict = {}
+        for g in genes:
+            expr = adata_vessel[:, g].X
+            if hasattr(expr, "toarray"):
+                expr = expr.toarray().ravel()
+            else:
+                expr = np.asarray(expr).ravel()
+            expr_dict[g] = expr
+
+        # Create dataframe for binning
+        df_vessel = pd.DataFrame({"d_norm": d_norm})
+        for g in genes:
+            df_vessel[g] = expr_dict[g]
+
+        # Bootstrap per vessel
+        for g in genes:
+            boot_curves = []
+            for _ in range(n_boot):
+                sample = df_vessel.sample(frac=1, replace=True)
+                mean_expr = sample.groupby(pd.cut(sample["d_norm"], bins=bins, labels=False))[g].mean()
+                mean_expr = mean_expr.reindex(range(n_bins), fill_value=np.nan)
+                boot_curves.append(mean_expr.values)
+            boot_curves = np.vstack(boot_curves)
+            # Store mean per bin across bootstrap for this vessel
+            gene_binned_vessels[g].append(boot_curves)
+
+    # -------------------------------------------------
+    # Combine vessels
+    # -------------------------------------------------
+    plt.figure(figsize=(8, 5))
+
+    for g in genes:
+        # gene_binned_vessels[g] is a list of (n_boot x n_bins) arrays
+        # Stack across vessels → shape: (n_vessels * n_boot, n_bins)
+        all_boot = np.vstack(gene_binned_vessels[g])
+        mean_all = np.nanmean(all_boot, axis=0)
+        ci_lo = np.nanpercentile(all_boot, 2.5, axis=0)
+        ci_hi = np.nanpercentile(all_boot, 97.5, axis=0)
+
+        plt.plot(bin_centers, mean_all, marker="o", label=g)
+        plt.fill_between(bin_centers, ci_lo, ci_hi, alpha=0.25)
+
+    plt.xlabel("Normalized distance (0 = lumen, 1 = perivascular edge)")
+    plt.ylabel("Mean expression per cell")
+    plt.title(f"Average gene expression across {len(vessel_masks)} vessels with CI")
+    plt.grid(True)
+    plt.legend()
+    plt.xlim(0, 1)
+
+    if save:
+        plt.savefig("gene_expression_avg_vessels_bootstrap_CI.pdf", dpi=300)
+
+    plt.show()
+    plt.close()
