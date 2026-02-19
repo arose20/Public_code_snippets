@@ -18,10 +18,27 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.lines import Line2D
 from matplotlib.colors import ListedColormap, BoundaryNorm
+import matplotlib.ticker as mticker
 from skimage.color import lab2rgb
 
+from collections import defaultdict
+import json
 
 from typing import Optional, Tuple, List, Dict, Union
+
+
+def restore_shapes_from_json(adata):
+    """
+    Convert JSON-stringified 'shapes' in ROI_info back to list-of-dicts.
+    """
+    for roi_dict in adata.uns['ROI_info'].values():
+        if "rois" in roi_dict and "shapes" in roi_dict["rois"]:
+            shapes = roi_dict["rois"]["shapes"]
+            if isinstance(shapes, str):
+                roi_dict["rois"]["shapes"] = json.loads(shapes)
+    return adata
+
+
 
 def kde_category_spatial(
     adata: ad.AnnData,
@@ -243,6 +260,7 @@ def spatial_plot(
     groups: Optional[List[str]] = None,
     roi_names_to_plot: Optional[List[str]] = None,
     roi_colors: Optional[Union[dict, list]] = None,
+    roi_linewidth: Optional[float] = 2,
     img: str = "hires",
     scatter: bool = False,
     point_size: int = 2,
@@ -455,7 +473,7 @@ def spatial_plot(
                     if subset:
                         roi_x -= col_start_um / microns_per_pixel / factor
                         roi_y -= row_start_um / microns_per_pixel / factor
-                    ax.plot(roi_x, roi_y, color=color, linewidth=2, alpha=0.9, zorder=15)
+                    ax.plot(roi_x, roi_y, color=color, linewidth=roi_linewidth, alpha=0.9, zorder=15)
 
             roi_handles.append(patches.Patch(facecolor=color, edgecolor=color, label=roi_name))
 
@@ -571,8 +589,64 @@ def spatial_plot(
     if not show_axes:
         ax.axis("off")
     else:
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
+        # ---- Determine micron extents ----
+        if subset:
+            x_min_um = col_start_um
+            x_max_um = col_end_um
+            y_min_um = row_start_um
+            y_max_um = row_end_um
+        else:
+            x_min_um = 0
+            x_max_um = img_plot.shape[1] * microns_per_pixel * factor
+            y_min_um = 0
+            y_max_um = img_plot.shape[0] * microns_per_pixel * factor
+
+        img_width_um = x_max_um - x_min_um
+
+        # ---- Choose nice tick spacing (~1/5 width) ----
+        nice_numbers = np.array([
+            50, 100, 200, 500,
+            1000, 2000, 5000,
+            10000, 20000, 50000
+        ])
+        tick_um = nice_numbers[
+            (np.abs(nice_numbers - img_width_um / 5)).argmin()
+        ]
+
+        # ---- Convert micron spacing to plot pixel spacing ----
+        tick_px = tick_um / (microns_per_pixel * factor)
+
+        # ---- Align first tick to nearest multiple in micron space ----
+        first_tick_um = np.ceil(x_min_um / tick_um) * tick_um
+        first_tick_px = (first_tick_um - x_min_um) / (microns_per_pixel * factor)
+
+        # ---- Set locators ----
+        ax.xaxis.set_major_locator(
+            mticker.MultipleLocator(tick_px)
+        )
+        ax.yaxis.set_major_locator(
+            mticker.MultipleLocator(tick_px)
+        )
+
+        # ---- Set formatter (round to avoid 1999 issue) ----
+        ax.xaxis.set_major_formatter(
+            mticker.FuncFormatter(
+                lambda x, pos: int(round(
+                    x * microns_per_pixel * factor + x_min_um
+                ))
+            )
+        )
+
+        ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(
+                lambda y, pos: int(round(
+                    y * microns_per_pixel * factor + y_min_um
+                ))
+            )
+        )
+
+        ax.set_xlabel("X (µm)")
+        ax.set_ylabel("Y (µm)")
 
     if save is not None:
         fig.savefig(save, dpi=dpi, bbox_inches="tight")
