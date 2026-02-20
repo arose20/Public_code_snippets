@@ -445,6 +445,11 @@ def spatial_plot(
 
     # ===================== ROI overlay =====================
     if roi_names_to_plot is not None and "ROI_names" in adata.uns:
+
+        # ---- Normalize to list if single string ----
+        if isinstance(roi_names_to_plot, str):
+            roi_names_to_plot = [roi_names_to_plot]
+            
         if roi_colors is None:
             cmap_roi = plt.get_cmap("tab20")
             roi_colors = {name: cmap_roi(i % cmap_roi.N) for i, name in enumerate(roi_names_to_plot)}
@@ -609,6 +614,7 @@ def spatial_plot(
             1000, 2000, 5000,
             10000, 20000, 50000
         ])
+
         tick_um = nice_numbers[
             (np.abs(nice_numbers - img_width_um / 5)).argmin()
         ]
@@ -620,15 +626,24 @@ def spatial_plot(
         first_tick_um = np.ceil(x_min_um / tick_um) * tick_um
         first_tick_px = (first_tick_um - x_min_um) / (microns_per_pixel * factor)
 
-        # ---- Set locators ----
+        # ---- Set locators with proper offset ----
         ax.xaxis.set_major_locator(
-            mticker.MultipleLocator(tick_px)
-        )
-        ax.yaxis.set_major_locator(
-            mticker.MultipleLocator(tick_px)
+            mticker.FixedLocator(
+                np.arange(first_tick_px,
+                          img_plot.shape[1],
+                          tick_px)
+            )
         )
 
-        # ---- Set formatter (round to avoid 1999 issue) ----
+        ax.yaxis.set_major_locator(
+            mticker.FixedLocator(
+                np.arange(first_tick_px,
+                          img_plot.shape[0],
+                          tick_px)
+            )
+        )
+
+        # ---- Formatter (convert plotted px → microns) ----
         ax.xaxis.set_major_formatter(
             mticker.FuncFormatter(
                 lambda x, pos: int(round(
@@ -845,6 +860,43 @@ def complete_roi_shapes_in_place(
 
         print(f"Completed ROI '{roi_name}' in place. Convex hull: {use_convex_hull}, smooth: {smooth}, points: {len(new_coords)}")
 
+        
+        
+def create_ROI_mask(
+    adata,
+    library_id: str,
+    name: str,
+    ROI: str,
+    force_recalculate: bool = False,
+):
+    
+    # Convert cell coordinates from microns to pixels
+    microns_per_pixel = adata.uns["spatial"][library_id]["scalefactors"]["pixel_size"]
+    coords_micron = adata.obsm["spatial"]
+    coords_px = coords_micron / microns_per_pixel
+    cell_points = [Point(c) for c in coords_px]
+    cell_barcodes = adata.obs_names.to_numpy()
+    
+    roi_polygons = {}
+    roi_key = adata.uns['ROI_names'][ROI][0]
+    roi_polygons[ROI] = Polygon(adata.uns['ROI_info'][roi_key]['rois']['shapes'][0]['coords'])
+    
+    poly = roi_polygons[ROI]
+
+    inside_mask = np.array([poly.contains(p) for p in cell_points])
+    barcodes_filtered = cell_barcodes[inside_mask]
+    coords_filtered = coords_px[inside_mask]
+    
+    adata.uns[name] = {
+        "barcodes": barcodes_filtered,
+        "coords_filtered": coords_filtered,
+         "roi_polygons" : roi_polygons
+    }
+
+    print(f"ROI mask '{name}' computed. {inside_mask.sum()} cells inside {ROI}.")
+        
+        
+        
 
 def create_vessel_mask(
     adata,
